@@ -1,0 +1,21 @@
+# Training outputs and checkpoints (large)
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
+# Matplotlib cache (optional dev env)
+.mpl_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Optional: uncomment to keep eval PNGs/CSVs out of the repo
+# eval/
