@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, Sequence
 
 import torch
 import torch.nn as nn
 
 from .pointnet_blocks import MLPDecoder, PointNetConditionEncoder
+
+InferenceLatentMode = Literal["posterior_mean", "posterior_sample", "prior_sample", "zero"]
 
 
 @dataclass(frozen=True)
@@ -28,9 +31,11 @@ class ConditionalVAEPointNet(nn.Module):
     """
     Conditional VAE for point cloud completion.
 
-    Condition is a PointNet global feature from partial input.
-    During training, posterior uses (condition, target_summary) to produce q(z|x,y).
-    During inference, z ~ N(0,I) (or user-provided).
+    Condition is a PointNet global feature from the partial input.
+    The approximate posterior is **q(z | partial)** only (amortized via the same
+    global embedding used for decoding), so training and inference use the same
+    latent path. Optional ``inference_latent`` controls how ``z`` is chosen when
+    ``z`` is not provided (e.g. prior sample for ablations).
     """
 
     def __init__(
@@ -43,6 +48,8 @@ class ConditionalVAEPointNet(nn.Module):
         latent_dim: int = 128,
         pooling: str = "max",
         dropout: float = 0.0,
+        point_mlp_channels: Sequence[int] = (64, 128, 256, 512),
+        decoder_hidden_dims: Sequence[int] = (512, 768, 1024),
     ) -> None:
         super().__init__()
         self.partial_points = partial_points
@@ -55,18 +62,11 @@ class ConditionalVAEPointNet(nn.Module):
             pooling=pooling,
             out_dim=cond_dim,
             dropout=dropout,
-        )
-
-        # Summarize the target full cloud (xyz only) during training for posterior.
-        self.full_enc = PointNetConditionEncoder(
-            in_channels=3,
-            pooling=pooling,
-            out_dim=cond_dim,
-            dropout=dropout,
+            point_mlp_channels=point_mlp_channels,
         )
 
         self.posterior = nn.Sequential(
-            nn.Linear(cond_dim * 2, 256),
+            nn.Linear(cond_dim, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 256),
             nn.ReLU(inplace=True),
@@ -76,7 +76,7 @@ class ConditionalVAEPointNet(nn.Module):
 
         self.decoder = MLPDecoder(
             in_dim=cond_dim + latent_dim,
-            hidden_dims=(512, 512, 1024),
+            hidden_dims=tuple(decoder_hidden_dims),
             out_points=full_points,
             dropout=dropout,
         )
@@ -84,19 +84,30 @@ class ConditionalVAEPointNet(nn.Module):
     def encode_condition(self, partial: torch.Tensor) -> torch.Tensor:
         return self.cond_enc(partial)
 
-    def encode_posterior(
-        self,
-        *,
-        cond: torch.Tensor,
-        full_xyz: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        full_sum = self.full_enc(full_xyz)
-        h = self.posterior(torch.cat([cond, full_sum], dim=-1))
+    def encode_latent(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """q(z | partial): amortized as MLP(cond) with cond = encoder(partial)."""
+        h = self.posterior(cond)
         mu = self.mu_head(h)
         logvar = self.logvar_head(h)
         return mu, logvar
 
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    def sample_z(
+        self,
+        mu: torch.Tensor,
+        logvar: torch.Tensor,
+        *,
+        inference_latent: InferenceLatentMode | None = None,
+    ) -> torch.Tensor:
+        if inference_latent == "zero":
+            return torch.zeros_like(mu)
+        if inference_latent == "prior_sample":
+            return torch.randn_like(mu)
+        if inference_latent == "posterior_mean":
+            return mu
+        if inference_latent == "posterior_sample":
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return mu + eps * std
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
@@ -112,26 +123,25 @@ class ConditionalVAEPointNet(nn.Module):
         partial: torch.Tensor,
         full_xyz: torch.Tensor | None = None,
         z: torch.Tensor | None = None,
+        inference_latent: InferenceLatentMode | str | None = None,
     ) -> CVAEOutput:
         """
         partial: (B, Np, C) where C is 3 (xyz) or 6 (xyz+features)
-        full_xyz: (B, Nf, 3) for training (enables posterior)
+        full_xyz: optional, kept for API compatibility with training scripts (unused).
         z: optional latent override
+        inference_latent: when ``z`` is None, how to form ``z`` from ``q(z|partial)``
+            (ignored in training except explicit modes). Default: train=reparam,
+            eval=posterior mean.
         """
+        _ = full_xyz  # q(z | partial) only; do not condition on ground-truth full cloud
         cond = self.encode_condition(partial)
 
         if z is None:
-            if full_xyz is None:
-                mu = torch.zeros(partial.shape[0], self.latent_dim, device=partial.device)
-                logvar = torch.zeros_like(mu)
-                z = torch.randn_like(mu)
-            else:
-                mu, logvar = self.encode_posterior(cond=cond, full_xyz=full_xyz)
-                z = self.reparameterize(mu, logvar)
+            mu, logvar = self.encode_latent(cond)
+            z = self.sample_z(mu, logvar, inference_latent=inference_latent)
         else:
             mu = torch.zeros(partial.shape[0], self.latent_dim, device=partial.device)
             logvar = torch.zeros_like(mu)
 
         pred = self.decode(cond=cond, z=z)
         return CVAEOutput(pred_full_xyz=pred, mu=mu, logvar=logvar, cond=cond)
-
