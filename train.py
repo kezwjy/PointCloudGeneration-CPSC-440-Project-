@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import random
 from dataclasses import asdict, dataclass
@@ -13,11 +12,13 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data_loader import PointCloudDataset
 from losses.metrics import chamfer_distance, emd_hungarian
 from models.cvae_pointnet import ConditionalVAEPointNet, kl_normal
+from models.pcn_completion import PCNCompletionNet
 
 
 def seed_everything(seed: int) -> None:
@@ -39,8 +40,9 @@ class TrainConfig:
     train_root: str
     val_root: str
     out_dir: str
+    architecture: Literal["cvae", "pcn"] = "cvae"
     seed: int = 42
-    epochs: int = 20
+    epochs: int = 30
     batch_size: int = 16
     lr: float = 1e-3
     weight_decay: float = 0.0
@@ -57,8 +59,8 @@ class TrainConfig:
     cd_weight: float = 1.0
     emd_weight: float = 0.0
     emd_points: int = 256
-    kl_max_beta: float = 0.01
-    kl_warmup_steps: int = 2000
+    kl_max_beta: float = 0.02
+    kl_warmup_steps: int = 3000
 
     # logging / eval cadence
     log_every: int = 50
@@ -103,9 +105,27 @@ def batch_to_inputs(batch: dict, *, variant: str, device: str) -> tuple[torch.Te
     return partial, full_xyz
 
 
+def build_model(cfg: TrainConfig, device: str) -> nn.Module:
+    in_ch = 3 if cfg.variant == "xyz" else 6
+    if cfg.architecture == "pcn":
+        return PCNCompletionNet(
+            partial_in_channels=in_ch,
+            cond_dim=cfg.cond_dim,
+            pooling=cfg.pooling,
+            dropout=cfg.dropout,
+        ).to(device)
+    return ConditionalVAEPointNet(
+        partial_in_channels=in_ch,
+        cond_dim=cfg.cond_dim,
+        latent_dim=cfg.latent_dim,
+        pooling=cfg.pooling,
+        dropout=cfg.dropout,
+    ).to(device)
+
+
 @torch.no_grad()
 def run_validation(
-    model: ConditionalVAEPointNet,
+    model: nn.Module,
     loader: DataLoader,
     *,
     cfg: TrainConfig,
@@ -114,15 +134,28 @@ def run_validation(
     cd_vals: list[float] = []
     emd_vals: list[float] = []
     kl_vals: list[float] = []
+    cond_cos_vals: list[float] = []
 
     for batch in loader:
         partial, full_xyz = batch_to_inputs(batch, variant=cfg.variant, device=cfg.device)
-        out = model(partial=partial, full_xyz=full_xyz)
+        if cfg.architecture == "pcn":
+            out = model(partial=partial)
+        else:
+            out = model(partial=partial, full_xyz=full_xyz)
 
         cd = chamfer_distance(out.pred_full_xyz, full_xyz, reduction="none")
-        kl = kl_normal(out.mu, out.logvar)
         cd_vals.extend(cd.detach().cpu().tolist())
-        kl_vals.extend(kl.detach().cpu().tolist())
+
+        if cfg.architecture == "cvae":
+            kl = kl_normal(out.mu, out.logvar)
+            kl_vals.extend(kl.detach().cpu().tolist())
+
+        c = F.normalize(out.cond, dim=-1)
+        sim = c @ c.T
+        b = sim.shape[0]
+        if b >= 2:
+            mask = ~torch.eye(b, dtype=torch.bool, device=sim.device)
+            cond_cos_vals.append(float(sim.masked_select(mask).mean().cpu()))
 
         if cfg.emd_weight > 0:
             emd = emd_hungarian(out.pred_full_xyz, full_xyz, points=cfg.emd_points, reduction="none")
@@ -130,8 +163,12 @@ def run_validation(
 
     metrics = {
         "val_cd": float(np.mean(cd_vals)) if cd_vals else float("nan"),
-        "val_kl": float(np.mean(kl_vals)) if kl_vals else float("nan"),
+        "val_cond_mean_cos": float(np.mean(cond_cos_vals)) if cond_cos_vals else float("nan"),
     }
+    if cfg.architecture == "cvae":
+        metrics["val_kl"] = float(np.mean(kl_vals)) if kl_vals else float("nan")
+    else:
+        metrics["val_kl"] = float("nan")
     if cfg.emd_weight > 0:
         metrics["val_emd"] = float(np.mean(emd_vals)) if emd_vals else float("nan")
     return metrics
@@ -164,13 +201,19 @@ def save_checkpoint(
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--variant", choices=["xyz", "xyzfeat"], default="xyzfeat")
+    p.add_argument(
+        "--architecture",
+        choices=["cvae", "pcn"],
+        default="cvae",
+        help="cvae: conditional VAE; pcn: deterministic PCN-style coarse+folding (no KL)",
+    )
     p.add_argument("--train_root", default="./data/chairs_processed/train")
     p.add_argument("--val_root", default="./data/chairs_processed/test")
     p.add_argument("--out_dir", default="./runs")
     p.add_argument("--run_name", default=None)
 
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=0.0)
@@ -184,14 +227,14 @@ def main() -> None:
     p.add_argument("--cd_weight", type=float, default=1.0)
     p.add_argument("--emd_weight", type=float, default=0.0)
     p.add_argument("--emd_points", type=int, default=256)
-    p.add_argument("--kl_max_beta", type=float, default=0.01)
-    p.add_argument("--kl_warmup_steps", type=int, default=2000)
+    p.add_argument("--kl_max_beta", type=float, default=0.02)
+    p.add_argument("--kl_warmup_steps", type=int, default=3000)
 
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--val_every_epochs", type=int, default=1)
     args = p.parse_args()
 
-    run_name = args.run_name or f"{args.variant}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = args.run_name or f"{args.variant}_{args.architecture}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) / run_name
 
     cfg = TrainConfig(
@@ -199,6 +242,7 @@ def main() -> None:
         train_root=args.train_root,
         val_root=args.val_root,
         out_dir=str(out_dir),
+        architecture=args.architecture,
         seed=args.seed,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -223,14 +267,7 @@ def main() -> None:
 
     seed_everything(cfg.seed)
 
-    in_ch = 3 if cfg.variant == "xyz" else 6
-    model = ConditionalVAEPointNet(
-        partial_in_channels=in_ch,
-        cond_dim=cfg.cond_dim,
-        latent_dim=cfg.latent_dim,
-        pooling=cfg.pooling,
-        dropout=cfg.dropout,
-    ).to(cfg.device)
+    model = build_model(cfg, cfg.device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -246,17 +283,28 @@ def main() -> None:
             for batch in train_loader:
                 partial, full_xyz = batch_to_inputs(batch, variant=cfg.variant, device=cfg.device)
 
-                out = model(partial=partial, full_xyz=full_xyz)
-                cd = chamfer_distance(out.pred_full_xyz, full_xyz, reduction="mean")
-                kl = kl_normal(out.mu, out.logvar).mean()
-                beta = kl_beta(step, warmup_steps=cfg.kl_warmup_steps, max_beta=cfg.kl_max_beta)
-
-                loss = cfg.cd_weight * cd + beta * kl
-                if cfg.emd_weight > 0:
-                    emd = emd_hungarian(out.pred_full_xyz, full_xyz, points=cfg.emd_points, reduction="mean")
-                    loss = loss + cfg.emd_weight * emd
+                if cfg.architecture == "pcn":
+                    out = model(partial=partial)
+                    cd = chamfer_distance(out.pred_full_xyz, full_xyz, reduction="mean")
+                    loss = cfg.cd_weight * cd
+                    if cfg.emd_weight > 0:
+                        emd = emd_hungarian(out.pred_full_xyz, full_xyz, points=cfg.emd_points, reduction="mean")
+                        loss = loss + cfg.emd_weight * emd
+                    else:
+                        emd = None
+                    kl = None
+                    beta = None
                 else:
-                    emd = None
+                    out = model(partial=partial, full_xyz=full_xyz)
+                    cd = chamfer_distance(out.pred_full_xyz, full_xyz, reduction="mean")
+                    kl = kl_normal(out.mu, out.logvar).mean()
+                    beta = kl_beta(step, warmup_steps=cfg.kl_warmup_steps, max_beta=cfg.kl_max_beta)
+                    loss = cfg.cd_weight * cd + beta * kl
+                    if cfg.emd_weight > 0:
+                        emd = emd_hungarian(out.pred_full_xyz, full_xyz, points=cfg.emd_points, reduction="mean")
+                        loss = loss + cfg.emd_weight * emd
+                    else:
+                        emd = None
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -268,9 +316,11 @@ def main() -> None:
                         "step": step,
                         "train_loss": float(loss.detach().cpu()),
                         "train_cd": float(cd.detach().cpu()),
-                        "train_kl": float(kl.detach().cpu()),
-                        "kl_beta": float(beta),
                     }
+                    if cfg.architecture == "cvae":
+                        assert kl is not None and beta is not None
+                        rec["train_kl"] = float(kl.detach().cpu())
+                        rec["kl_beta"] = float(beta)
                     if emd is not None:
                         rec["train_emd"] = float(emd.detach().cpu())
                     f_log.write(json.dumps(rec) + "\n")
@@ -288,7 +338,10 @@ def main() -> None:
                 save_checkpoint(out_dir, model=model, optimizer=optimizer, epoch=epoch, step=step, cfg=cfg, extra_metrics=metrics)
                 if val_cd < best_val_cd:
                     best_val_cd = val_cd
-                    torch.save(model.state_dict(), out_dir / "best_model.pt")
+                    torch.save(
+                        {"model_state": model.state_dict(), "cfg": asdict(cfg)},
+                        out_dir / "best_model.pt",
+                    )
 
     print(f"Done. Outputs in {out_dir}")
 

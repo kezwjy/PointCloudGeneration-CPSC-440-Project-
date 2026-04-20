@@ -7,11 +7,11 @@ Examples:
     --checkpoint runs/run_xyzfeat_5ep/best_model.pt \\
     --out recon.png
 
-  # Multiple samples in one figure (rows x 3 columns):
+  # Multiple samples in one figure (rows x 3 columns), distinct chairs:
   python3 scripts/visualize_reconstruction.py \\
     --variant xyzfeat \\
     --checkpoint runs/run_xyzfeat_5ep/best_model.pt \\
-    --indices 0,1,2,3,4 \\
+    --distinct_chairs 5 \\
     --out recon_multi.png
 """
 from __future__ import annotations
@@ -35,8 +35,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from data_loader import PointCloudDataset
+from data_loader import PointCloudDataset, first_n_distinct_chair_indices
 from models.cvae_pointnet import ConditionalVAEPointNet
+from models.pcn_completion import PCNCompletionNet
 
 
 def _subsample_partial(partial: torch.Tensor, k: int) -> torch.Tensor:
@@ -45,6 +46,13 @@ def _subsample_partial(partial: torch.Tensor, k: int) -> torch.Tensor:
         return partial
     idx = torch.randint(low=0, high=n, size=(b, k), device=partial.device)
     return partial.gather(1, idx[..., None].expand(-1, -1, c))
+
+
+def _load_state_dict_and_cfg(path: Path) -> tuple[dict, dict | None]:
+    payload = torch.load(path, map_location="cpu")
+    if isinstance(payload, dict) and "model_state" in payload:
+        return payload["model_state"], payload.get("cfg")
+    return payload, None
 
 
 def load_model(
@@ -56,23 +64,41 @@ def load_model(
     pooling: str,
     dropout: float,
     device: str,
-) -> ConditionalVAEPointNet:
-    in_ch = 3 if variant == "xyz" else 6
-    model = ConditionalVAEPointNet(
-        partial_in_channels=in_ch,
-        cond_dim=cond_dim,
-        latent_dim=latent_dim,
-        pooling=pooling,
-        dropout=dropout,
-    ).to(device)
+    architecture: str | None = None,
+):
     ckpt = Path(path)
-    payload = torch.load(ckpt, map_location="cpu")
-    if isinstance(payload, dict) and "model_state" in payload:
-        model.load_state_dict(payload["model_state"])
+    state_dict, cfg_dict = _load_state_dict_and_cfg(ckpt)
+    arch = (
+        architecture
+        if architecture is not None
+        else (cfg_dict.get("architecture", "cvae") if cfg_dict else "cvae")
+    )
+    if cfg_dict:
+        variant = cfg_dict.get("variant", variant)
+        cond_dim = cfg_dict.get("cond_dim", cond_dim)
+        latent_dim = cfg_dict.get("latent_dim", latent_dim)
+        pooling = cfg_dict.get("pooling", pooling)
+        dropout = cfg_dict.get("dropout", dropout)
+
+    in_ch = 3 if variant == "xyz" else 6
+    if arch == "pcn":
+        model = PCNCompletionNet(
+            partial_in_channels=in_ch,
+            cond_dim=cond_dim,
+            pooling=pooling,
+            dropout=dropout,
+        ).to(device)
     else:
-        model.load_state_dict(payload)
+        model = ConditionalVAEPointNet(
+            partial_in_channels=in_ch,
+            cond_dim=cond_dim,
+            latent_dim=latent_dim,
+            pooling=pooling,
+            dropout=dropout,
+        ).to(device)
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
-    return model
+    return model, arch, variant
 
 
 def main() -> None:
@@ -84,7 +110,26 @@ def main() -> None:
     p.add_argument(
         "--indices",
         default=None,
-        help="Comma-separated dataset indices for a multi-row figure (overrides --index). Example: 0,1,2,3,4",
+        help="Comma-separated dataset indices for a multi-row figure (overrides --index). Example: 0,2,4,6,8",
+    )
+    p.add_argument(
+        "--distinct_chairs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Use the first N unique chair folders (one partial each); mutually exclusive with --indices",
+    )
+    p.add_argument(
+        "--inference_latent",
+        default="posterior_mean",
+        choices=["posterior_mean", "posterior_sample", "prior_sample", "zero"],
+        help="CVAE only: latent at inference (ignored for PCN)",
+    )
+    p.add_argument(
+        "--architecture",
+        choices=["cvae", "pcn"],
+        default=None,
+        help="Override model type; default from checkpoint cfg (else cvae)",
     )
     p.add_argument(
         "--partial_points",
@@ -106,8 +151,13 @@ def main() -> None:
 
     ds = PointCloudDataset(args.test_root)
 
-    if args.indices is not None:
-        idx_list: list[int] = []
+    if args.distinct_chairs is not None and args.indices is not None:
+        raise SystemExit("Use either --indices or --distinct_chairs, not both")
+
+    if args.distinct_chairs is not None:
+        idx_list = first_n_distinct_chair_indices(ds, args.distinct_chairs)
+    elif args.indices is not None:
+        idx_list = []
         for part in args.indices.split(","):
             part = part.strip()
             if not part:
@@ -122,7 +172,7 @@ def main() -> None:
         if idx < 0 or idx >= len(ds):
             raise SystemExit(f"index must be in [0, {len(ds) - 1}], got {idx}")
 
-    model = load_model(
+    model, arch, variant = load_model(
         args.checkpoint,
         variant=args.variant,
         cond_dim=args.cond_dim,
@@ -130,6 +180,7 @@ def main() -> None:
         pooling=args.pooling,
         dropout=args.dropout,
         device=args.device,
+        architecture=args.architecture,
     )
 
     n_rows = len(idx_list)
@@ -154,7 +205,7 @@ def main() -> None:
         partial_feat = sample["partial_feat"].unsqueeze(0).to(args.device)
         full_xyz = sample["full_xyz"].unsqueeze(0).to(args.device)
 
-        if args.variant == "xyz":
+        if variant == "xyz":
             partial = partial_xyz
         else:
             partial = torch.cat([partial_xyz, partial_feat], dim=-1)
@@ -165,7 +216,14 @@ def main() -> None:
         part_vis = partial[0, :, :3].detach().cpu().numpy()
 
         with torch.no_grad():
-            out = model(partial=partial, full_xyz=None)
+            if arch == "pcn":
+                out = model(partial=partial)
+            else:
+                out = model(
+                    partial=partial,
+                    full_xyz=None,
+                    inference_latent=args.inference_latent,
+                )
             pred = out.pred_full_xyz[0].cpu().numpy()
         gt = full_xyz[0].cpu().numpy()
 

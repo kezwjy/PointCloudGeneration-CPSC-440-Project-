@@ -1,0 +1,25 @@
+{
+  "variant": "xyz",
+  "architecture": "cvae",
+  "checkpoint": "runs/cvae_xyz_5ep/best_model.pt",
+  "emd_points": 256,
+  "inference_latent": "posterior_mean",
+  "sweep": {
+    "1000": {
+      "cd": 43.804725193977355,
+      "emd": 26.795759773254396
+    },
+    "500": {
+      "cd": 44.17044226169586,
+      "emd": 26.995734796524047
+    },
+    "250": {
+      "cd": 44.565164332389834,
+      "emd": 27.041417016983033
+    },
+    "default": {
+      "cd": 43.804725193977355,
+      "emd": 26.95892384529114
+    }
+  }
+}

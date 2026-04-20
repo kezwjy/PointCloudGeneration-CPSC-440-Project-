@@ -1,13 +1,16 @@
 import os
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 class PointCloudDataset(Dataset):
     def __init__(self, root_dir):
         self.samples = []
 
-        for obj in os.listdir(root_dir):
+        for obj in sorted(os.listdir(root_dir)):
             obj_path = os.path.join(root_dir, obj)
 
             full_path = os.path.join(obj_path, 'full.npy')
@@ -38,7 +41,33 @@ class PointCloudDataset(Dataset):
             "partial_feat": torch.tensor(partial_feat, dtype=torch.float32),
             "full_xyz": torch.tensor(full_xyz, dtype=torch.float32),
         }
-    
+
+
+def distinct_chair_start_indices(dataset: PointCloudDataset) -> list[int]:
+    """
+    First dataset index for each unique object folder (e.g. chair_0909).
+
+    The dataset stores two rows per chair (partial1 and partial2); consecutive
+    indices often share the same ground-truth full cloud. Use this list to pick
+    one row per chair for diversity comparisons.
+    """
+    seen: set[str] = set()
+    out: list[int] = []
+    for i, (partial_path, _) in enumerate(dataset.samples):
+        cid = Path(partial_path).parent.name
+        if cid not in seen:
+            seen.add(cid)
+            out.append(i)
+    return out
+
+
+def first_n_distinct_chair_indices(dataset: PointCloudDataset, n: int) -> list[int]:
+    """First ``n`` indices from :func:`distinct_chair_start_indices`."""
+    idx = distinct_chair_start_indices(dataset)
+    if n > len(idx):
+        raise ValueError(f"Requested {n} distinct chairs but dataset has {len(idx)}")
+    return idx[:n]
+
 
 if __name__=="__main__":
     # Example usage
