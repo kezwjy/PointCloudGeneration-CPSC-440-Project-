@@ -33,63 +33,53 @@ class ConditionalVAEPointNet(nn.Module):
     During inference, z ~ N(0,I) (or user-provided).
     """
 
-    def __init__(
-        self,
-        *,
-        partial_in_channels: int,
-        partial_points: int = 1000,
-        full_points: int = 3000,
-        cond_dim: int = 256,
-        latent_dim: int = 128,
-        pooling: str = "max",
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self, *, 
+                 partial_in_channels: int, 
+                 partial_points: int = 1000, 
+                 full_points: int = 3000, 
+                 cond_dim: int = 256,
+                 latent_dim: int = 128,
+                 pooling: str = "max",
+                 dropout: float = 0.0) -> None:
+        
         super().__init__()
         self.partial_points = partial_points
         self.full_points = full_points
         self.cond_dim = cond_dim
         self.latent_dim = latent_dim
 
-        self.cond_enc = PointNetConditionEncoder(
-            in_channels=partial_in_channels,
-            pooling=pooling,
-            out_dim=cond_dim,
-            dropout=dropout,
-        )
+        self.cond_enc = PointNetConditionEncoder(in_channels=partial_in_channels,
+                                                 pooling=pooling,
+                                                 out_dim=cond_dim,
+                                                 dropout=dropout)
 
         # Summarize the target full cloud (xyz only) during training for posterior.
-        self.full_enc = PointNetConditionEncoder(
-            in_channels=3,
-            pooling=pooling,
-            out_dim=cond_dim,
-            dropout=dropout,
-        )
+        self.full_enc = PointNetConditionEncoder(in_channels=3,
+                                                 pooling=pooling,
+                                                 out_dim=cond_dim,
+                                                 dropout=dropout)
 
-        self.posterior = nn.Sequential(
-            nn.Linear(cond_dim * 2, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 256),
-            nn.ReLU(inplace=True),
-        )
+        self.posterior = nn.Sequential(nn.Linear(cond_dim * 2, 256),
+                                       nn.ReLU(inplace=True),
+                                       nn.Linear(256, 256),
+                                       nn.ReLU(inplace=True))
+        
         self.mu_head = nn.Linear(256, latent_dim)
         self.logvar_head = nn.Linear(256, latent_dim)
 
-        self.decoder = MLPDecoder(
-            in_dim=cond_dim + latent_dim,
-            hidden_dims=(512, 512, 1024),
-            out_points=full_points,
-            dropout=dropout,
-        )
+        self.decoder = MLPDecoder(in_dim=cond_dim + latent_dim,
+                                  hidden_dims=(512, 512, 1024),
+                                  out_points=full_points,
+                                  dropout=dropout)
 
     def encode_condition(self, partial: torch.Tensor) -> torch.Tensor:
         return self.cond_enc(partial)
 
-    def encode_posterior(
-        self,
-        *,
-        cond: torch.Tensor,
-        full_xyz: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_posterior(self,
+                         *,
+                         cond: torch.Tensor,
+                         full_xyz: torch.Tensor,) -> tuple[torch.Tensor, torch.Tensor]:
+        
         full_sum = self.full_enc(full_xyz)
         h = self.posterior(torch.cat([cond, full_sum], dim=-1))
         mu = self.mu_head(h)
@@ -106,13 +96,11 @@ class ConditionalVAEPointNet(nn.Module):
     def decode(self, *, cond: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return self.decoder(torch.cat([cond, z], dim=-1))
 
-    def forward(
-        self,
-        *,
-        partial: torch.Tensor,
-        full_xyz: torch.Tensor | None = None,
-        z: torch.Tensor | None = None,
-    ) -> CVAEOutput:
+    def forward(self,
+                *,
+                partial: torch.Tensor,
+                full_xyz: torch.Tensor | None = None,
+                z: torch.Tensor | None = None,) -> CVAEOutput:
         """
         partial: (B, Np, C) where C is 3 (xyz) or 6 (xyz+features)
         full_xyz: (B, Nf, 3) for training (enables posterior)

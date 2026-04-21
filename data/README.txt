@@ -19,7 +19,7 @@ chairs/
 
 Processed point cloud datasets for each chair are contained in chairs_processed.
 
-chairs_processed/
+./data/chairs_processed/
     /train
         /chair_0001
             /full.npy

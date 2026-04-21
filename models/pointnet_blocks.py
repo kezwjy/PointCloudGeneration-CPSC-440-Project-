@@ -7,14 +7,13 @@ import torch
 import torch.nn as nn
 
 
-def _make_mlp(
-    in_dim: int,
-    layer_dims: Sequence[int],
-    *,
-    activation: nn.Module | None = None,
-    use_batchnorm: bool = True,
-    dropout: float = 0.0,
-) -> nn.Sequential:
+def _make_mlp(in_dim: int,
+              layer_dims: Sequence[int],
+              *,
+              activation: nn.Module | None = None,
+              use_batchnorm: bool = True,
+              dropout: float = 0.0) -> nn.Sequential:
+    
     if activation is None:
         activation = nn.ReLU(inplace=True)
 
@@ -40,16 +39,16 @@ class SharedMLP(nn.Module):
     Output: (B, out_channels, N)
     """
 
-    def __init__(
-        self,
-        in_channels: int,
-        channels: Sequence[int],
-        *,
-        activation: nn.Module | None = None,
-        use_batchnorm: bool = True,
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self, 
+                 in_channels: int, 
+                 channels: Sequence[int], 
+                 *, 
+                 activation: nn.Module | None = None, 
+                 use_batchnorm: bool = True, 
+                 dropout: float = 0.0,) -> None:
+        
         super().__init__()
+
         if activation is None:
             activation = nn.ReLU(inplace=True)
 
@@ -76,31 +75,28 @@ class PointNetConditionEncoder(nn.Module):
     into a single global condition vector.
     """
 
-    def __init__(
-        self,
-        in_channels: int,
-        *,
-        point_mlp_channels: Sequence[int] = (64, 128, 256),
-        pooling: str = "max",
-        out_dim: int = 256,
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self,
+                 in_channels: int,
+                 *,
+                 point_mlp_channels: Sequence[int] = (64, 128, 256),
+                 pooling: str = "mean",
+                 out_dim: int = 256,
+                 dropout: float = 0.0) -> None:
+        
         super().__init__()
+
         if pooling not in {"max", "mean"}:
             raise ValueError(f"pooling must be 'max' or 'mean', got {pooling!r}")
 
         self.pooling = pooling
-        self.point_mlp = SharedMLP(
-            in_channels=in_channels,
-            channels=point_mlp_channels,
-            dropout=dropout,
-        )
+
+        self.point_mlp = SharedMLP(in_channels=in_channels,
+                                   channels=point_mlp_channels,
+                                   dropout=dropout)
 
         last_c = int(point_mlp_channels[-1]) if len(point_mlp_channels) else in_channels
-        self.proj = nn.Sequential(
-            nn.Linear(last_c, out_dim),
-            nn.ReLU(inplace=True),
-        )
+
+        self.proj = nn.Sequential(nn.Linear(last_c, out_dim), nn.ReLU(inplace=True))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -111,6 +107,7 @@ class PointNetConditionEncoder(nn.Module):
             raise ValueError(f"Expected x to have shape (B,N,C), got {tuple(x.shape)}")
 
         x = x.transpose(1, 2).contiguous()  # (B, C, N)
+        
         feat = self.point_mlp(x)  # (B, C', N)
 
         if self.pooling == "max":
@@ -126,22 +123,21 @@ class MLPDecoder(nn.Module):
     Simple MLP decoder that outputs a fixed-size point set (B, out_points, 3).
     """
 
-    def __init__(
-        self,
-        in_dim: int,
-        *,
-        hidden_dims: Sequence[int] = (512, 512, 1024),
-        out_points: int = 3000,
-        dropout: float = 0.0,
-    ) -> None:
+    def __init__(self,
+                 in_dim: int,
+                 *,
+                 hidden_dims: Sequence[int] = (512, 512, 1024),
+                 out_points: int = 3000,
+                 dropout: float = 0.0) -> None:
+        
         super().__init__()
+
         self.out_points = out_points
-        self.mlp = _make_mlp(
-            in_dim,
-            list(hidden_dims),
-            use_batchnorm=True,
-            dropout=dropout,
-        )
+        self.mlp = _make_mlp(in_dim,
+                             list(hidden_dims),
+                             use_batchnorm=True,
+                             dropout=dropout)
+        
         self.out = nn.Linear(int(hidden_dims[-1]) if hidden_dims else in_dim, out_points * 3)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
