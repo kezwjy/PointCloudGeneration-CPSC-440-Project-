@@ -69,22 +69,20 @@ def make_dataloaders(cfg: TrainConfig) -> tuple[DataLoader, DataLoader]:
     train_ds = PointCloudDataset(cfg.train_root)
     val_ds = PointCloudDataset(cfg.val_root)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=(cfg.device.startswith("cuda")),
-        drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-        pin_memory=(cfg.device.startswith("cuda")),
-        drop_last=False,
-    )
+    train_loader = DataLoader(train_ds,
+                              batch_size=cfg.batch_size,
+                              shuffle=True,
+                              num_workers=cfg.num_workers,
+                              pin_memory=(cfg.device.startswith("cuda")),
+                              drop_last=True)
+    
+    val_loader = DataLoader(val_ds,
+                            batch_size=cfg.batch_size,
+                            shuffle=False,
+                            num_workers=cfg.num_workers,
+                            pin_memory=(cfg.device.startswith("cuda")),
+                            drop_last=False)
+    
     return train_loader, val_loader
 
 
@@ -104,12 +102,10 @@ def batch_to_inputs(batch: dict, *, variant: str, device: str) -> tuple[torch.Te
 
 
 @torch.no_grad()
-def run_validation(
-    model: ConditionalVAEPointNet,
-    loader: DataLoader,
-    *,
-    cfg: TrainConfig,
-) -> dict[str, float]:
+def run_validation(model: ConditionalVAEPointNet, 
+                   loader: DataLoader,
+                   *,
+                   cfg: TrainConfig) -> dict[str, float]:
     model.eval()
     cd_vals: list[float] = []
     emd_vals: list[float] = []
@@ -132,21 +128,22 @@ def run_validation(
         "val_cd": float(np.mean(cd_vals)) if cd_vals else float("nan"),
         "val_kl": float(np.mean(kl_vals)) if kl_vals else float("nan"),
     }
+
     if cfg.emd_weight > 0:
         metrics["val_emd"] = float(np.mean(emd_vals)) if emd_vals else float("nan")
+
     return metrics
 
 
-def save_checkpoint(
-    out_dir: Path,
-    *,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    epoch: int,
-    step: int,
-    cfg: TrainConfig,
-    extra_metrics: dict[str, float] | None = None,
-) -> Path:
+def save_checkpoint(out_dir: Path,
+                    *,
+                    model: nn.Module,
+                    optimizer: torch.optim.Optimizer,
+                    epoch: int,
+                    step: int,
+                    cfg: TrainConfig,
+                    extra_metrics: dict[str, float] | None = None) -> Path:
+    
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "checkpoint.pt"
     payload = {
@@ -194,29 +191,27 @@ def main() -> None:
     run_name = args.run_name or f"{args.variant}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(args.out_dir) / run_name
 
-    cfg = TrainConfig(
-        variant=args.variant,
-        train_root=args.train_root,
-        val_root=args.val_root,
-        out_dir=str(out_dir),
-        seed=args.seed,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        num_workers=args.num_workers,
-        cond_dim=args.cond_dim,
-        latent_dim=args.latent_dim,
-        pooling=args.pooling,
-        dropout=args.dropout,
-        cd_weight=args.cd_weight,
-        emd_weight=args.emd_weight,
-        emd_points=args.emd_points,
-        kl_max_beta=args.kl_max_beta,
-        kl_warmup_steps=args.kl_warmup_steps,
-        log_every=args.log_every,
-        val_every_epochs=args.val_every_epochs,
-    )
+    cfg = TrainConfig(variant=args.variant,
+                      train_root=args.train_root,
+                      val_root=args.val_root,
+                      out_dir=str(out_dir),
+                      seed=args.seed,
+                      epochs=args.epochs,
+                      batch_size=args.batch_size,
+                      lr=args.lr,
+                      weight_decay=args.weight_decay,
+                      num_workers=args.num_workers,
+                      cond_dim=args.cond_dim,
+                      latent_dim=args.latent_dim,
+                      pooling=args.pooling,
+                      dropout=args.dropout,
+                      cd_weight=args.cd_weight,
+                      emd_weight=args.emd_weight,
+                      emd_points=args.emd_points,
+                      kl_max_beta=args.kl_max_beta,
+                      kl_warmup_steps=args.kl_warmup_steps,
+                      log_every=args.log_every,
+                      val_every_epochs=args.val_every_epochs)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -224,13 +219,12 @@ def main() -> None:
     seed_everything(cfg.seed)
 
     in_ch = 3 if cfg.variant == "xyz" else 6
-    model = ConditionalVAEPointNet(
-        partial_in_channels=in_ch,
-        cond_dim=cfg.cond_dim,
-        latent_dim=cfg.latent_dim,
-        pooling=cfg.pooling,
-        dropout=cfg.dropout,
-    ).to(cfg.device)
+    
+    model = ConditionalVAEPointNet(partial_in_channels=in_ch,
+                                   cond_dim=cfg.cond_dim,
+                                   latent_dim=cfg.latent_dim,
+                                   pooling=cfg.pooling,
+                                   dropout=cfg.dropout).to(cfg.device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 

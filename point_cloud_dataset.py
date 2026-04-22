@@ -8,6 +8,8 @@ class PointCloudDataset(Dataset):
         self.samples = []
 
         for obj in os.listdir(root_dir):
+            if obj.endswith('_0003'): break # ************* remove ***************
+                
             obj_path = os.path.join(root_dir, obj)
 
             full_path = os.path.join(obj_path, 'full.npy')
@@ -35,15 +37,3 @@ class PointCloudDataset(Dataset):
 
         return torch.from_numpy(partial_xyz).float(), torch.from_numpy(full_xyz).float()
     
-
-if __name__=="__main__":
-    # Example usage
-    from torch.utils.data import DataLoader
-
-    dataset = PointCloudDataset('./data/chairs_processed/train')
-
-    loader = DataLoader(
-        dataset,
-        batch_size=16,
-        shuffle=True,
-        num_workers=4)

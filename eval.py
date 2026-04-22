@@ -29,15 +29,14 @@ def _subsample_partial(partial: torch.Tensor, k: int) -> torch.Tensor:
 
 
 @torch.no_grad()
-def evaluate(
-    *,
-    model: ConditionalVAEPointNet,
-    loader: DataLoader,
-    variant: Literal["xyz", "xyzfeat"],
-    device: str,
-    sparsity_k: int | None,
-    emd_points: int,
-) -> dict[str, float]:
+def evaluate(*,
+             model: ConditionalVAEPointNet,
+             loader: DataLoader,
+             variant: Literal["xyz", "xyzfeat"],
+             device: str,
+             sparsity_k: int | None,
+             emd_points: int) -> dict[str, float]:
+    
     model.eval()
 
     cd_vals: list[float] = []
@@ -92,23 +91,19 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ds = PointCloudDataset(args.test_root)
-    loader = DataLoader(
-        ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=args.device.startswith("cuda"),
-        drop_last=False,
-    )
+    loader = DataLoader(ds,
+                        batch_size=args.batch_size,
+                        shuffle=False,
+                        num_workers=args.num_workers,
+                        pin_memory=args.device.startswith("cuda"),
+                        drop_last=False)
 
     in_ch = 3 if args.variant == "xyz" else 6
-    model = ConditionalVAEPointNet(
-        partial_in_channels=in_ch,
-        cond_dim=args.cond_dim,
-        latent_dim=args.latent_dim,
-        pooling=args.pooling,
-        dropout=args.dropout,
-    ).to(args.device)
+    model = ConditionalVAEPointNet(partial_in_channels=in_ch,
+                                   cond_dim=args.cond_dim,
+                                   latent_dim=args.latent_dim,
+                                   pooling=args.pooling,
+                                   dropout=args.dropout).to(args.device)
 
     ckpt_path = Path(args.checkpoint)
     if ckpt_path.name.endswith(".pt"):
@@ -136,26 +131,24 @@ def main() -> None:
 
     rows = []
     for k in sweep_ks:
-        m = evaluate(
-            model=model,
-            loader=loader,
-            variant=args.variant,
-            device=args.device,
-            sparsity_k=k,
-            emd_points=args.emd_points,
-        )
+        m = evaluate(model=model,
+                     loader=loader,
+                     variant=args.variant,
+                     device=args.device,
+                     sparsity_k=k,
+                     emd_points=args.emd_points)
+        
         results["sweep"][str(k)] = m
         rows.append({"partial_points": k, **m})
 
     # Also evaluate the default (no extra subsampling)
-    m_full = evaluate(
-        model=model,
-        loader=loader,
-        variant=args.variant,
-        device=args.device,
-        sparsity_k=None,
-        emd_points=args.emd_points,
-    )
+    m_full = evaluate(model=model,
+                      loader=loader,
+                      variant=args.variant,
+                      device=args.device,
+                      sparsity_k=None,
+                      emd_points=args.emd_points)
+    
     results["sweep"]["default"] = m_full
     rows.append({"partial_points": -1, **m_full})
 

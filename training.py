@@ -31,8 +31,8 @@ def train(root_dir="./data/chairs_processed/train",
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
 
     model = ConditionalVAEPointNet(partial_in_channels=3,   # xyz + 3 features
-                                   partial_points=1000,
-                                   full_points=3000,
+                                   partial_points=2000,
+                                   full_points=5000,
                                    cond_dim=256,
                                    latent_dim=128).to(device).float()
 
@@ -62,7 +62,7 @@ def train(root_dir="./data/chairs_processed/train",
             kl_loss = kl_normal(mu, logvar).mean()
 
             # beta-VAE style weighting (important for stability)
-            beta = 0.001  # you can tune this
+            beta = min(1.0, epoch / 20) * 0.01
             loss = recon_loss + beta * kl_loss
 
             loss.backward()
@@ -72,7 +72,7 @@ def train(root_dir="./data/chairs_processed/train",
 
         print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss / len(loader):.6f}")
 
-    torch.save(model.state_dict(), "cvae_pointcloud_onlypoints.pth")
+    torch.save(model.state_dict(), "cvae_pointcloud_deletelater.pth")
 
 if __name__ == "__main__":
-    train()
+    train(batch_size=2)
